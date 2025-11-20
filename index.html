@@ -17,6 +17,7 @@
     Move: WASD • Mouse Look: Move Mouse<br>
     <span id="modeText">Mode: Play</span><br>
     In Build Mode: Click to place, Z=Wall, X=Floor, C=Ramp, V=Cone, R=Rotate, Q=Exit Build Mode<br>
+    Editing: Hold E + Aim → Click to delete<br>
     Out of Build Mode: Click to shoot, Q=Enter Build Mode
 </div>
 
@@ -38,7 +39,6 @@ const renderer = new THREE.WebGLRenderer({antialias:true});
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
-// lighting
 const sun = new THREE.DirectionalLight(0xffffff, 1);
 sun.position.set(5,10,8);
 scene.add(sun);
@@ -144,14 +144,52 @@ function snapToGrid(vec, gridSize = 3){
 }
 
 /* ---------------------------------------------------
-    BUILDING
+    BUILDING SYSTEM
 ----------------------------------------------------*/
 let buildModeActive = false;
 let buildMode = "wall";
 let rotateAmount = 0;
 const builds = [];
-
 const modeText = document.getElementById("modeText");
+
+/* ----------- BUILD PREVIEW ----------- */
+let previewMesh = null;
+
+function createPreviewMesh(){
+    let geom;
+    const previewMat = new THREE.MeshLambertMaterial({
+        color: 0x55aaff,
+        transparent: true,
+        opacity: 0.45
+    });
+
+    switch(buildMode){
+        case "wall": geom = new THREE.BoxGeometry(3,3,0.3); break;
+        case "floor": geom = new THREE.PlaneGeometry(3,3); break;
+        case "ramp": geom = new THREE.BoxGeometry(3,1,3); break;
+        case "cone": geom = new THREE.ConeGeometry(1.8,3,4); break;
+    }
+
+    if (previewMesh) scene.remove(previewMesh);
+    previewMesh = new THREE.Mesh(geom, previewMat);
+    previewMesh.renderOrder = 999;
+    scene.add(previewMesh);
+}
+
+/* ---------------------------------------------------
+    EDITING SYSTEM
+----------------------------------------------------*/
+const raycaster = new THREE.Raycaster();
+let selectedBuild = null;
+
+let highlightMat = new THREE.MeshLambertMaterial({
+    color: 0x00aaff,
+    transparent: true,
+    opacity: 0.35
+});
+let highlightMesh = null;
+
+let editingMode = false; // Hold E
 
 document.addEventListener('keydown', e => {
     const k = e.key.toLowerCase();
@@ -160,21 +198,41 @@ document.addEventListener('keydown', e => {
     if (k === 'q') {
         buildModeActive = !buildModeActive;
         modeText.textContent = "Mode: " + (buildModeActive ? "Build" : "Play");
+
+        if (buildModeActive) {
+            createPreviewMesh();
+            if (highlightMesh) highlightMesh.visible = false;
+        } else {
+            if (previewMesh) previewMesh.visible = false;
+        }
+
         return;
     }
 
-    if (!buildModeActive) return; // other keys do nothing outside build mode
+    // Enter edit mode (HOLD E)
+    if (k === "e") editingMode = true;
 
-    // Build selection
-    if (k === 'z') buildMode = "wall";
-    if (k === 'x') buildMode = "floor";
-    if (k === 'c') buildMode = "ramp";
-    if (k === 'v') buildMode = "cone";
+    if (!buildModeActive) return;
 
-    // Rotate build
+    if (k === 'z') { buildMode = "wall"; createPreviewMesh(); }
+    if (k === 'x') { buildMode = "floor"; createPreviewMesh(); }
+    if (k === 'c') { buildMode = "ramp"; createPreviewMesh(); }
+    if (k === 'v') { buildMode = "cone"; createPreviewMesh(); }
+
     if (k === 'r') rotateAmount += Math.PI / 2;
 });
 
+document.addEventListener("keyup", ev => {
+    if (ev.key.toLowerCase() === "e") {
+        editingMode = false;
+        selectedBuild = null;
+        if (highlightMesh) highlightMesh.visible = false;
+    }
+});
+
+/* ---------------------------------------------------
+    PLACE BUILD
+----------------------------------------------------*/
 function build(){
     let geom;
     const mat = new THREE.MeshLambertMaterial({ color: 0x55aaff });
@@ -188,21 +246,9 @@ function build(){
 
     const obj = new THREE.Mesh(geom, mat);
 
-    // Placement in front of player
-    const forward = new THREE.Vector3(0,0,-5)
-        .applyAxisAngle(new THREE.Vector3(0,1,0), camYaw);
+    obj.position.copy(previewMesh.position);
+    obj.rotation.copy(previewMesh.rotation);
 
-    let placePos = player.position.clone().add(forward);
-    placePos = snapToGrid(placePos,3);
-    obj.position.copy(placePos);
-
-    obj.rotation.y = camYaw + rotateAmount;
-
-    if (buildMode === "floor") obj.rotation.x = -Math.PI/2;
-    if (buildMode === "ramp") obj.rotation.x = -Math.PI/4;
-    if (buildMode === "cone") obj.rotation.x = Math.PI;
-
-    // Prevent overlap
     for (let b of builds) {
         if (b.position.distanceTo(obj.position) < 0.1) return;
     }
@@ -212,15 +258,96 @@ function build(){
 }
 
 /* ---------------------------------------------------
-    MOUSE CLICK HANDLING
+    DELETE BUILD
 ----------------------------------------------------*/
 document.addEventListener('mousedown', () => {
+
+    // Editing active? Delete selected build
+    if (editingMode && selectedBuild) {
+        scene.remove(selectedBuild);
+        builds.splice(builds.indexOf(selectedBuild), 1);
+
+        if (highlightMesh) highlightMesh.visible = false;
+        selectedBuild = null;
+        return;
+    }
+
+    // Building mode
     if (buildModeActive) {
-        build();   // place build
+        build();
     } else {
-        shoot();   // shoot
+        shoot();
     }
 });
+
+/* ---------------------------------------------------
+    UPDATE EDITING (HIGHLIGHT)
+----------------------------------------------------*/
+function updateEditing() {
+    if (!editingMode) return;
+
+    raycaster.setFromCamera({ x: 0, y: 0 }, camera);
+
+    const hits = raycaster.intersectObjects(builds);
+
+    if (hits.length === 0) {
+        if (highlightMesh) highlightMesh.visible = false;
+        selectedBuild = null;
+        return;
+    }
+
+    const hit = hits[0].object;
+
+    // Must be close enough to edit
+    if (camera.position.distanceTo(hit.position) > 15) {
+        if (highlightMesh) highlightMesh.visible = false;
+        selectedBuild = null;
+        return;
+    }
+
+    selectedBuild = hit;
+
+    if (!highlightMesh) {
+        highlightMesh = new THREE.Mesh(hit.geometry, highlightMat);
+        highlightMesh.renderOrder = 998;
+        scene.add(highlightMesh);
+    }
+
+    highlightMesh.position.copy(hit.position);
+    highlightMesh.rotation.copy(hit.rotation);
+    highlightMesh.visible = true;
+}
+
+/* ---------------------------------------------------
+    UPDATE PREVIEW
+----------------------------------------------------*/
+function updatePreview(){
+    if (!previewMesh || !buildModeActive) return;
+
+    const forward = new THREE.Vector3(0,0,-5)
+        .applyAxisAngle(new THREE.Vector3(0,1,0), camYaw);
+
+    let pos = player.position.clone().add(forward);
+    pos = snapToGrid(pos, 3);
+    previewMesh.position.copy(pos);
+
+    previewMesh.rotation.set(0, camYaw + rotateAmount, 0);
+
+    if (buildMode === "floor") previewMesh.rotation.x = -Math.PI/2;
+    if (buildMode === "ramp") previewMesh.rotation.x = -Math.PI/4;
+    if (buildMode === "cone") previewMesh.rotation.x = Math.PI;
+
+    // Overlap color
+    let blocked = false;
+    for (let b of builds) {
+        if (b.position.distanceTo(previewMesh.position) < 0.1) {
+            blocked = true;
+            break;
+        }
+    }
+
+    previewMesh.material.color.set(blocked ? 0xff3333 : 0x55aaff);
+}
 
 /* ---------------------------------------------------
     GAME LOOP
@@ -228,7 +355,6 @@ document.addEventListener('mousedown', () => {
 function animate(){
     requestAnimationFrame(animate);
 
-    // movement
     const forward = new THREE.Vector3(Math.sin(camYaw),0,Math.cos(camYaw));
     const right = new THREE.Vector3(forward.z,0,-forward.x);
 
@@ -238,8 +364,9 @@ function animate(){
     if (keys['d']) player.position.add(right.clone().multiplyScalar(0.12));
 
     updateCamera();
+    updatePreview();
+    updateEditing();
 
-    // bullets
     for (let i = bullets.length - 1; i >= 0; i--) {
         bullets[i].position.add(bullets[i].velocity);
         if (bullets[i].position.length() > 250){
@@ -253,6 +380,6 @@ function animate(){
 
 animate();
 </script>
-<script src="script.js"></script>
+
 </body>
 </html>
