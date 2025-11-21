@@ -74,6 +74,23 @@ const keys = {};
 document.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
 document.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
 
+// JUMP / VERTICAL PHYSICS
+let velY = 0; // vertical velocity
+const gravity = -0.03; // gravity acceleration per frame
+const jumpStrength = 0.65; // initial jump impulse
+let onGround = true;
+
+// Spacebar to jump — use code so it works reliably across layouts
+document.addEventListener('keydown', e => {
+    if (e.code === 'Space') {
+        e.preventDefault();
+        if (onGround) {
+            velY = jumpStrength;
+            onGround = false;
+        }
+    }
+});
+
 document.body.onclick = ()=> document.body.requestPointerLock();
 
 /* ---------------------------------------------------
@@ -362,6 +379,41 @@ function animate(){
     if (keys['s']) player.position.add(forward.clone().multiplyScalar(0.12));
     if (keys['a']) player.position.add(right.clone().multiplyScalar(-0.12));
     if (keys['d']) player.position.add(right.clone().multiplyScalar(0.12));
+
+    // Vertical physics: apply gravity and vertical velocity
+    velY += gravity;
+    player.position.y += velY;
+
+    // Support calculation: ground + builds (allows standing on placed objects)
+    const eyeHeight = 1.6; // camera/player eye height above surface
+    let supportY = 0 + eyeHeight; // ground plane at y=0
+
+    for (let b of builds) {
+        // compute world AABB for the build
+        const box = new THREE.Box3().setFromObject(b);
+
+        // check horizontal overlap (x/z). Small padding to be generous when stepping on edges
+        const pad = 0.1;
+        if (player.position.x >= box.min.x - pad && player.position.x <= box.max.x + pad &&
+            player.position.z >= box.min.z - pad && player.position.z <= box.max.z + pad) {
+
+            // candidate stand Y is top of the build plus eye height
+            const topY = box.max.y;
+            const candidate = topY + eyeHeight;
+
+            // choose the highest available support under the player
+            if (candidate > supportY) supportY = candidate;
+        }
+    }
+
+    // apply support (land on ground or builds)
+    if (player.position.y <= supportY) {
+        player.position.y = supportY;
+        velY = 0;
+        onGround = true;
+    } else {
+        onGround = false;
+    }
 
     updateCamera();
     updatePreview();
